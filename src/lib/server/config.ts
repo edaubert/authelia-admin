@@ -32,8 +32,23 @@ export interface LLDAPGraphQLConfigFields {
 	ldap_base_dn?: string;
 }
 
+export interface FileProviderArgon2ConfigFields {
+	variant: string;
+	iterations: number;
+	memory: number;
+	parallelism: number;
+	keyLength: number;
+	saltLength: number;
+}
+
+export interface FileProviderPasswordConfigFields {
+	algorithm: string;
+	argon2: FileProviderArgon2ConfigFields;
+}
+
 export interface FileProviderConfigFields {
 	path: string;
+	password: FileProviderPasswordConfigFields;
 }
 
 export type DirectoryConfig =
@@ -198,10 +213,27 @@ async function parseDirectoryConfig(config: unknown): Promise<DirectoryConfig> {
 }
 
 /**
- * Resolve the file provider's users database path.
- * Uses AAD_DIRECTORY_FILE_PATH / directory.file.path if set, otherwise falls
- * back to reading `authentication_backend.file.path` from Authelia's own
- * configuration.yml (same file consulted for the storage backend).
+ * Authelia's own defaults for authentication_backend.file.password.argon2,
+ * used whenever a given field isn't explicitly set - matches what Authelia
+ * itself applies, so we hash the same way it would.
+ * See: https://www.authelia.com/configuration/first-factor/file/
+ */
+const DEFAULT_ARGON2_CONFIG: FileProviderArgon2ConfigFields = {
+	variant: 'argon2id',
+	iterations: 3,
+	memory: 65536,
+	parallelism: 4,
+	keyLength: 32,
+	saltLength: 16
+};
+
+/**
+ * Resolve the file provider's users database path and password hashing
+ * parameters. Uses AAD_DIRECTORY_FILE_PATH / directory.file.path if set,
+ * otherwise falls back to reading `authentication_backend.file` from
+ * Authelia's own configuration.yml (same file consulted for the storage
+ * backend) - the password parameters always come from there, since they
+ * must match whatever Authelia itself is configured to verify against.
  */
 async function parseFileProviderConfig(config: unknown): Promise<FileProviderConfigFields> {
 	const cfg = (config && typeof config === 'object') ? config as Record<string, unknown> : {};
@@ -209,7 +241,9 @@ async function parseFileProviderConfig(config: unknown): Promise<FileProviderCon
 	const explicitPath = process.env.AAD_DIRECTORY_FILE_PATH ||
 		(cfg.path ? substituteEnvVars(String(cfg.path)) : undefined);
 
-	const path = explicitPath || (await readAutheliaFileProviderPath());
+	const autheliaFileSection = await readAutheliaFileProviderSection();
+	const autheliaPath = autheliaFileSection?.path;
+	const path = explicitPath || (typeof autheliaPath === 'string' && autheliaPath.length > 0 ? autheliaPath : undefined);
 	if (!path) {
 		throw new Error(
 			'Directory file provider path is not configured. Set AAD_DIRECTORY_FILE_PATH, directory.file.path, ' +
@@ -217,12 +251,35 @@ async function parseFileProviderConfig(config: unknown): Promise<FileProviderCon
 		);
 	}
 
-	return { path };
+	return { path, password: parseFileProviderPasswordConfig(autheliaFileSection?.password) };
+}
+
+function parseFileProviderPasswordConfig(section: unknown): FileProviderPasswordConfigFields {
+	const cfg = (section && typeof section === 'object') ? section as Record<string, unknown> : {};
+	const algorithm = typeof cfg.algorithm === 'string' && cfg.algorithm.length > 0 ? cfg.algorithm : 'argon2';
+
+	const argon2Cfg = (cfg.argon2 && typeof cfg.argon2 === 'object') ? cfg.argon2 as Record<string, unknown> : {};
+	const argon2: FileProviderArgon2ConfigFields = {
+		variant: typeof argon2Cfg.variant === 'string' && argon2Cfg.variant.length > 0
+			? argon2Cfg.variant
+			: DEFAULT_ARGON2_CONFIG.variant,
+		iterations: numberOr(argon2Cfg.iterations, DEFAULT_ARGON2_CONFIG.iterations),
+		memory: numberOr(argon2Cfg.memory, DEFAULT_ARGON2_CONFIG.memory),
+		parallelism: numberOr(argon2Cfg.parallelism, DEFAULT_ARGON2_CONFIG.parallelism),
+		keyLength: numberOr(argon2Cfg.key_length, DEFAULT_ARGON2_CONFIG.keyLength),
+		saltLength: numberOr(argon2Cfg.salt_length, DEFAULT_ARGON2_CONFIG.saltLength)
+	};
+
+	return { algorithm, argon2 };
+}
+
+function numberOr(value: unknown, fallback: number): number {
+	return value === undefined || value === null || value === '' ? fallback : Number(value);
 }
 
 const DEFAULT_AUTHELIA_CONFIG_PATH = '/config/configuration.yml';
 
-async function readAutheliaFileProviderPath(): Promise<string | undefined> {
+async function readAutheliaFileProviderSection(): Promise<Record<string, unknown> | undefined> {
 	const autheliaConfigPath = process.env.AAD_AUTHELIA_CONFIG_PATH ||
 		process.env.AUTHELIA_CONFIG_PATH ||
 		DEFAULT_AUTHELIA_CONFIG_PATH;
@@ -235,22 +292,19 @@ async function readAutheliaFileProviderPath(): Promise<string | undefined> {
 			return undefined;
 		}
 		throw new Error(
-			`Failed to read Authelia configuration "${autheliaConfigPath}" for file provider path: ${(error as Error).message}`
+			`Failed to read Authelia configuration "${autheliaConfigPath}" for file provider settings: ${(error as Error).message}`
 		);
 	}
 
 	const parsed = parse(content);
-	const filePath = (parsed && typeof parsed === 'object')
+	const authBackend = (parsed && typeof parsed === 'object')
 		? (parsed as Record<string, unknown>).authentication_backend
 		: undefined;
-	const path = (filePath && typeof filePath === 'object')
-		? (filePath as Record<string, unknown>).file
-		: undefined;
-	const resolvedPath = (path && typeof path === 'object')
-		? (path as Record<string, unknown>).path
+	const file = (authBackend && typeof authBackend === 'object')
+		? (authBackend as Record<string, unknown>).file
 		: undefined;
 
-	return typeof resolvedPath === 'string' && resolvedPath.length > 0 ? resolvedPath : undefined;
+	return (file && typeof file === 'object') ? file as Record<string, unknown> : undefined;
 }
 
 function parseLLDAPGraphQLConfig(config: unknown): LLDAPGraphQLConfigFields {

@@ -1,0 +1,125 @@
+---
+theme: "light"
+server:
+  address: "tcp://0.0.0.0:9091/"
+  disable_healthcheck: false
+  buffers:
+    read: 4096
+    write: 4096
+  timeouts:
+    read: "6s"
+    write: "6s"
+    idle: "30s"
+  endpoints:
+    enable_pprof: false
+    enable_expvars: false
+    authz: {}
+    rate_limits: {}
+
+authentication_backend:
+  password_reset:
+    disable: false
+  password_change:
+    disable: false
+  refresh_interval: "1m"
+  file:
+    path: "/config/users_database.yml"
+    password:
+      algorithm: "argon2"
+      argon2:
+        variant: "argon2id"
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+
+log:
+  level: "debug"
+  format: "json"
+  file_path: "/var/log/authelia/authelia.log"
+  keep_stdout: true
+
+totp:
+  disable: "true"
+  issuer: "localhost"
+  algorithm: "sha1"
+  digits: 6
+  period: 30
+  skew: 1
+  secret_size: 32
+  allowed_algorithms:
+    - "SHA1"
+    - "SHA256"
+  allowed_digits:
+    - 6
+    - 8
+  disable_reuse_security_policy: false
+
+webauthn:
+  enable_passkey_login: false
+  attestation_conveyance_preference: "indirect"
+  timeout: "60 seconds"
+  filtering:
+    permitted_aaguids: []
+    prohibited_aaguids: []
+    prohibit_backup_eligibility: true
+  selection_criteria:
+    attachment: ""
+    discoverability: "preferred"
+    user_verification: "preferred"
+  metadata:
+    enabled: false
+
+password_policy:
+  standard:
+    enabled: true
+    min_length: 8
+    max_length: 0
+    require_uppercase: true
+    require_lowercase: true
+    require_number: true
+    require_special: false
+
+identity_validation:
+  reset_password:
+    jwt_secret: "a_very_important_secret"
+    jwt_lifespan: "5 minutes"
+    jwt_algorithm: "HS256"
+
+access_control:
+  default_policy: "one_factor"
+
+session:
+  secret: "insecure_session_secret"
+  name: "authelia_session"
+  same_site: "lax"
+  inactivity: "1h"
+  expiration: "12h"
+  remember_me: "1M"
+  cookies:
+    - domain: "localhost.test"
+      authelia_url: "https://auth.localhost.test"
+      default_redirection_url: "https://auth.localhost.test/auth-admin"
+      name: "authelia_session"
+      same_site: "lax"
+      inactivity: "30m"
+      expiration: "24h"
+      remember_me: "1M"
+
+regulation:
+  modes:
+    - "user"
+    - "ip"
+  max_retries: 5
+  find_time: "1m"
+  ban_time: "3m"
+
+storage:
+  encryption_key: "a_very_important_secret"
+  local:
+    path: "/data/db.sqlite3"
+
+notifier:
+  filesystem:
+    filename: "/data/notification.txt"

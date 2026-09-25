@@ -1,6 +1,7 @@
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
+import * as argon2 from 'argon2';
 import { parse, stringify, YAMLParseError } from 'yaml';
 import type {
 	IDirectoryService,
@@ -25,15 +26,32 @@ const log = createLogger('file-provider');
 
 const NOT_IMPLEMENTED = 'This operation is not yet supported for the Authelia file provider';
 
+/** Thrown internally when the file changed on disk since it was read; never escapes the service. */
+class ConflictError extends Error {}
+
+/** A mutation's outcome: the value to return, and whether anything actually needs writing. */
+interface MutationOutcome<T> {
+	result: T;
+	write: boolean;
+}
+
+function sameEntry(a: FileProviderUserEntry | undefined, b: FileProviderUserEntry | undefined): boolean {
+	return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 /**
  * Directory service backed by Authelia's file authentication backend
  * (a YAML users database, e.g. users_database.yml).
  *
- * Browsing users and groups, editing a user's email/display name/disabled
- * flag, deleting a user, changing group membership, and renaming/deleting a
- * group (as a bulk update across its members) are supported. Creating users
- * (requires password hashing, see changePassword) and creating a group with
- * no members (nothing to persist) are not.
+ * Supports browsing, creating, editing, and deleting users; changing
+ * passwords (argon2id only - see hashPassword); changing group membership;
+ * and renaming/deleting a group (as a bulk update across its members).
+ * Creating a group with no members has no meaningful effect here (nothing to
+ * persist) - see createGroup.
+ *
+ * Writes are guarded against concurrent modification from outside this
+ * service instance (another process, or Authelia's own password-reset flow
+ * writing to the same file): see transact().
  */
 export class FileProviderService implements IDirectoryService {
 	private config: FileProviderConfig;
@@ -46,14 +64,7 @@ export class FileProviderService implements IDirectoryService {
 		this.config = config;
 	}
 
-	private async readDatabase(): Promise<FileProviderDatabase> {
-		let content: string;
-		try {
-			content = await fs.readFile(this.config.path, 'utf-8');
-		} catch (error) {
-			throw new Error(`Cannot read file provider database "${this.config.path}": ${(error as Error).message}`);
-		}
-
+	private parseDatabase(content: string): FileProviderDatabase {
 		try {
 			return (parse(content) as FileProviderDatabase | null) ?? {};
 		} catch (error) {
@@ -63,6 +74,24 @@ export class FileProviderService implements IDirectoryService {
 					: '';
 			throw new Error(`File provider database "${this.config.path}": invalid YAML${position}`);
 		}
+	}
+
+	private async readDatabase(): Promise<FileProviderDatabase> {
+		return (await this.readDatabaseWithMtime()).db;
+	}
+
+	/** Reads the database along with the file's mtime, used to detect concurrent external writes. */
+	private async readDatabaseWithMtime(): Promise<{ db: FileProviderDatabase; mtimeMs: number }> {
+		let content: string;
+		let mtimeMs: number;
+		try {
+			content = await fs.readFile(this.config.path, 'utf-8');
+			mtimeMs = (await fs.stat(this.config.path)).mtimeMs;
+		} catch (error) {
+			throw new Error(`Cannot read file provider database "${this.config.path}": ${(error as Error).message}`);
+		}
+
+		return { db: this.parseDatabase(content), mtimeMs };
 	}
 
 	/**
@@ -84,8 +113,30 @@ export class FileProviderService implements IDirectoryService {
 	}
 
 	/**
-	 * Serialize a read-modify-write operation against any other pending one
-	 * from this service instance, so concurrent edits don't interleave.
+	 * Write the database only if the file's mtime still matches what it was
+	 * when read (i.e. nothing else wrote to it in the meantime). Throws
+	 * ConflictError otherwise - the file changed under us, e.g. from another
+	 * process running this service, or Authelia's own password-reset flow.
+	 * This narrows the race window but doesn't eliminate it (there's a small
+	 * gap between the stat check and the rename); it's an optimistic guard
+	 * against a rare admin-edit conflict, not a distributed lock.
+	 */
+	private async writeDatabaseIfUnchanged(db: FileProviderDatabase, expectedMtimeMs: number): Promise<void> {
+		const currentMtimeMs = await fs.stat(this.config.path).then(
+			(stat) => stat.mtimeMs,
+			() => undefined
+		);
+		if (currentMtimeMs !== expectedMtimeMs) {
+			throw new ConflictError('File provider database changed on disk since it was read');
+		}
+		await this.writeDatabase(db);
+	}
+
+	/**
+	 * Serialize an operation against any other pending one from this service
+	 * instance, so concurrent edits issued by this process don't interleave.
+	 * This alone doesn't protect against a different process (or Authelia
+	 * itself) writing to the file at the same time - see transact() for that.
 	 */
 	private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.writeQueue.then(operation, operation);
@@ -93,9 +144,118 @@ export class FileProviderService implements IDirectoryService {
 		return result;
 	}
 
+	/**
+	 * Read-modify-write with optimistic concurrency control: if the file
+	 * changed on disk between the read and the write (some other process, or
+	 * Authelia's own password-reset flow, wrote to it concurrently), check
+	 * whether that external change actually touched the user(s) this
+	 * operation cares about (`getTouchedUserIds`, re-evaluated fresh each
+	 * attempt so it stays correct even as the file changes):
+	 *  - if none of them were affected, the conflict is unrelated - retry the
+	 *    whole read-modify-write against the new file state;
+	 *  - if one of them was affected, this operation and the external change
+	 *    both touched the same user, so retrying could silently discard
+	 *    someone else's edit - fail instead of guessing which should win.
+	 */
+	private async transact<T>(
+		getTouchedUserIds: (db: FileProviderDatabase) => string[],
+		mutate: (db: FileProviderDatabase) => MutationOutcome<T>,
+		maxAttempts = 5
+	): Promise<T> {
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			const { db, mtimeMs } = await this.readDatabaseWithMtime();
+			const touchedIds = getTouchedUserIds(db);
+			// Cloned, not just referenced: mutate() below may edit these same
+			// entry objects in place, and this snapshot must reflect their
+			// state as read, not after that in-place mutation.
+			const before = touchedIds.map((id) => structuredClone(db.users?.[id]));
+
+			const { result, write } = mutate(db);
+			if (!write) {
+				return result;
+			}
+
+			try {
+				await this.writeDatabaseIfUnchanged(db, mtimeMs);
+				return result;
+			} catch (error) {
+				if (!(error instanceof ConflictError)) {
+					throw error;
+				}
+
+				const latest = await this.readDatabase();
+				const after = touchedIds.map((id) => latest.users?.[id]);
+				const conflictsWithOurUsers = before.some((entry, i) => !sameEntry(entry, after[i]));
+
+				if (conflictsWithOurUsers) {
+					throw new Error(
+						`Concurrent modification detected: user(s) ${touchedIds.join(', ')} ` +
+						`were changed by another process while this change was being saved`
+					);
+				}
+				if (attempt === maxAttempts) {
+					throw new Error(
+						'Concurrent modification detected: too many conflicting writes, please try again'
+					);
+				}
+				log.warn(
+					`File provider database changed concurrently (unrelated to user(s) ${touchedIds.join(', ')}); retrying (attempt ${attempt}/${maxAttempts})`
+				);
+				// Unrelated external change - loop and retry against the new state.
+			}
+		}
+		// Unreachable: the loop always returns or throws.
+		throw new Error('Concurrent modification detected: too many conflicting writes, please try again');
+	}
+
+	/**
+	 * Like transact(), but for operations that return an OperationResult: a
+	 * genuine, unretryable conflict (see transact()) is reported the same way
+	 * as any other domain failure (e.g. "user not found") rather than
+	 * rejecting the promise.
+	 */
+	private async transactResult(
+		getTouchedUserIds: (db: FileProviderDatabase) => string[],
+		mutate: (db: FileProviderDatabase) => MutationOutcome<OperationResult>
+	): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			try {
+				return await this.transact<OperationResult>(getTouchedUserIds, mutate);
+			} catch (error) {
+				return { success: false, error: (error as Error).message };
+			}
+		});
+	}
+
 	private async listEntries(): Promise<[string, FileProviderUserEntry][]> {
 		const db = await this.readDatabase();
 		return Object.entries(db.users ?? {});
+	}
+
+	/**
+	 * Hash a password the way Authelia's file provider expects, using the
+	 * algorithm/parameters read from Authelia's own configuration.yml so the
+	 * result verifies correctly. Only argon2id is currently supported; other
+	 * configured algorithms are refused rather than risking an incompatible
+	 * hash (Authelia fails to load the whole file if it can't parse one).
+	 */
+	private async hashPassword(plainPassword: string): Promise<string> {
+		const { algorithm, argon2: cfg } = this.config.password;
+		if (algorithm !== 'argon2' || cfg.variant !== 'argon2id') {
+			throw new Error(
+				`Password hashing is only supported for algorithm "argon2" with variant "argon2id" ` +
+				`(Authelia is configured with algorithm "${algorithm}", variant "${cfg.variant}")`
+			);
+		}
+
+		return argon2.hash(plainPassword, {
+			type: argon2.argon2id,
+			memoryCost: cfg.memory,
+			timeCost: cfg.iterations,
+			parallelism: cfg.parallelism,
+			hashLength: cfg.keyLength,
+			salt: randomBytes(cfg.saltLength)
+		});
 	}
 
 	// === User operations ===
@@ -123,58 +283,99 @@ export class FileProviderService implements IDirectoryService {
 		return match ? mapUser(match[0], match[1]) : null;
 	}
 
-	async createUser(_input: CreateUserInput): Promise<User> {
-		// Every entry in the file provider's database must have a password
-		// hash matching Authelia's configured algorithm/parameters, or the
-		// whole file fails to load on next reload - locking out every user,
-		// not just the new one. CreateUserInput carries no password, and
-		// hashing isn't implemented yet (see changePassword), so creation is
-		// deliberately refused rather than writing an invalid entry.
-		throw new Error(`${NOT_IMPLEMENTED} (requires password hashing support)`);
+	async createUser(input: CreateUserInput): Promise<User> {
+		// CreateUserInput carries no password. The "New User" flow always
+		// calls changePassword immediately afterwards (with automatic
+		// rollback via deleteUser if that fails), so give the new entry a
+		// random, unguessable placeholder hash rather than ever writing an
+		// empty/invalid password field - even momentarily.
+		const placeholderHash = await this.hashPassword(randomBytes(32).toString('hex'));
+
+		return this.runExclusive(() =>
+			this.transact<User>(
+				() => [input.id],
+				(db) => {
+					db.users = db.users ?? {};
+					if (db.users[input.id]) {
+						throw new Error(`User "${input.id}" already exists`);
+					}
+
+					const entry: FileProviderUserEntry = {
+						disabled: false,
+						displayname: input.displayName ?? input.id,
+						password: placeholderHash,
+						email: input.email,
+						groups: []
+					};
+					db.users[input.id] = entry;
+					return { result: mapUser(input.id, entry), write: true };
+				}
+			)
+		);
 	}
 
 	async updateUser(input: UpdateUserInput): Promise<OperationResult> {
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			const entry = db.users?.[input.id];
-			if (!entry) {
-				return { success: false, error: `User "${input.id}" not found` };
-			}
+		return this.transactResult(
+			() => [input.id],
+			(db) => {
+				const entry = db.users?.[input.id];
+				if (!entry) {
+					return { result: { success: false, error: `User "${input.id}" not found` }, write: false };
+				}
 
-			// Custom attributes (insertAttributes/removeAttributes) are not
-			// supported by the file provider, which has a fixed field set;
-			// they are silently ignored here, matching the empty attribute
-			// schema returned by getUserAttributesSchema().
-			if (input.email !== undefined) {
-				entry.email = input.email;
-			}
-			if (input.displayName !== undefined) {
-				entry.displayname = input.displayName;
-			}
-			if (input.disabled !== undefined) {
-				entry.disabled = input.disabled;
-			}
+				// Custom attributes (insertAttributes/removeAttributes) are not
+				// supported by the file provider, which has a fixed field set;
+				// they are silently ignored here, matching the empty attribute
+				// schema returned by getUserAttributesSchema().
+				if (input.email !== undefined) {
+					entry.email = input.email;
+				}
+				if (input.displayName !== undefined) {
+					entry.displayname = input.displayName;
+				}
+				if (input.disabled !== undefined) {
+					entry.disabled = input.disabled;
+				}
 
-			await this.writeDatabase(db);
-			return { success: true };
-		});
+				return { result: { success: true }, write: true };
+			}
+		);
 	}
 
 	async deleteUser(userId: string): Promise<OperationResult> {
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			if (!db.users?.[userId]) {
-				return { success: false, error: `User "${userId}" not found` };
-			}
+		return this.transactResult(
+			() => [userId],
+			(db) => {
+				if (!db.users?.[userId]) {
+					return { result: { success: false, error: `User "${userId}" not found` }, write: false };
+				}
 
-			delete db.users[userId];
-			await this.writeDatabase(db);
-			return { success: true };
-		});
+				delete db.users[userId];
+				return { result: { success: true }, write: true };
+			}
+		);
 	}
 
-	async changePassword(_userId: string, _newPassword: string): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async changePassword(userId: string, newPassword: string): Promise<OperationResult> {
+		let hash: string;
+		try {
+			hash = await this.hashPassword(newPassword);
+		} catch (error) {
+			return { success: false, error: (error as Error).message };
+		}
+
+		return this.transactResult(
+			() => [userId],
+			(db) => {
+				const entry = db.users?.[userId];
+				if (!entry) {
+					return { result: { success: false, error: `User "${userId}" not found` }, write: false };
+				}
+
+				entry.password = hash;
+				return { result: { success: true }, write: true };
+			}
+		);
 	}
 
 	// === Group operations ===
@@ -199,47 +400,47 @@ export class FileProviderService implements IDirectoryService {
 			return { success: true };
 		}
 
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			const entries = Object.entries(db.users ?? {});
-			let changed = false;
+		return this.transactResult(
+			(db) => membersOf(db, input.id),
+			(db) => {
+				const entries = Object.entries(db.users ?? {});
+				let changed = false;
 
-			for (const [, entry] of entries) {
-				if (entry.groups?.includes(input.id)) {
-					entry.groups = [...new Set(entry.groups.map((g) => (g === input.id ? newName : g)))];
-					changed = true;
+				for (const [, entry] of entries) {
+					if (entry.groups?.includes(input.id)) {
+						entry.groups = [...new Set(entry.groups.map((g) => (g === input.id ? newName : g)))];
+						changed = true;
+					}
 				}
-			}
 
-			if (!changed) {
-				return { success: false, error: `Group "${input.id}" not found` };
+				if (!changed) {
+					return { result: { success: false, error: `Group "${input.id}" not found` }, write: false };
+				}
+				return { result: { success: true }, write: true };
 			}
-
-			await this.writeDatabase(db);
-			return { success: true };
-		});
+		);
 	}
 
 	async deleteGroup(groupId: string): Promise<OperationResult> {
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			const entries = Object.entries(db.users ?? {});
-			let changed = false;
+		return this.transactResult(
+			(db) => membersOf(db, groupId),
+			(db) => {
+				const entries = Object.entries(db.users ?? {});
+				let changed = false;
 
-			for (const [, entry] of entries) {
-				if (entry.groups?.includes(groupId)) {
-					entry.groups = entry.groups.filter((g) => g !== groupId);
-					changed = true;
+				for (const [, entry] of entries) {
+					if (entry.groups?.includes(groupId)) {
+						entry.groups = entry.groups.filter((g) => g !== groupId);
+						changed = true;
+					}
 				}
-			}
 
-			if (!changed) {
-				return { success: false, error: `Group "${groupId}" not found` };
+				if (!changed) {
+					return { result: { success: false, error: `Group "${groupId}" not found` }, write: false };
+				}
+				return { result: { success: true }, write: true };
 			}
-
-			await this.writeDatabase(db);
-			return { success: true };
-		});
+		);
 	}
 
 	async listGroups(): Promise<GroupSummary[]> {
@@ -272,36 +473,40 @@ export class FileProviderService implements IDirectoryService {
 	// === Membership operations ===
 
 	async addUserToGroup(userId: string, groupId: string): Promise<OperationResult> {
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			const entry = db.users?.[userId];
-			if (!entry) {
-				return { success: false, error: `User "${userId}" not found` };
-			}
+		return this.transactResult(
+			() => [userId],
+			(db) => {
+				const entry = db.users?.[userId];
+				if (!entry) {
+					return { result: { success: false, error: `User "${userId}" not found` }, write: false };
+				}
 
-			entry.groups = entry.groups ?? [];
-			if (!entry.groups.includes(groupId)) {
+				entry.groups = entry.groups ?? [];
+				if (entry.groups.includes(groupId)) {
+					return { result: { success: true }, write: false };
+				}
 				entry.groups.push(groupId);
-				await this.writeDatabase(db);
+				return { result: { success: true }, write: true };
 			}
-			return { success: true };
-		});
+		);
 	}
 
 	async removeUserFromGroup(userId: string, groupId: string): Promise<OperationResult> {
-		return this.runExclusive(async () => {
-			const db = await this.readDatabase();
-			const entry = db.users?.[userId];
-			if (!entry) {
-				return { success: false, error: `User "${userId}" not found` };
-			}
+		return this.transactResult(
+			() => [userId],
+			(db) => {
+				const entry = db.users?.[userId];
+				if (!entry) {
+					return { result: { success: false, error: `User "${userId}" not found` }, write: false };
+				}
 
-			if (entry.groups?.includes(groupId)) {
+				if (!entry.groups?.includes(groupId)) {
+					return { result: { success: true }, write: false };
+				}
 				entry.groups = entry.groups.filter((g) => g !== groupId);
-				await this.writeDatabase(db);
+				return { result: { success: true }, write: true };
 			}
-			return { success: true };
-		});
+		);
 	}
 
 	// === Schema operations ===
@@ -335,4 +540,10 @@ export class FileProviderService implements IDirectoryService {
 		// it from every member.
 		return false;
 	}
+}
+
+function membersOf(db: FileProviderDatabase, groupId: string): string[] {
+	return Object.entries(db.users ?? {})
+		.filter(([, entry]) => entry.groups?.includes(groupId))
+		.map(([id]) => id);
 }

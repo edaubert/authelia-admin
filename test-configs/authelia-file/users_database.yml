@@ -1,0 +1,30 @@
+users:
+  admin:
+    disabled: false
+    displayname: Admin User
+    password: $argon2id$v=19$m=65536,t=3,p=4$m1kTNzwRy6Mi0UQ56oZpRw$Y7Xl0buKf9S2VQhyiArxkmuGRRIix9G5FglxW6446Ec
+    email: admin@localhost.test
+    groups:
+      - admin
+      - group1
+  umanager:
+    disabled: false
+    displayname: User Manager
+    password: $argon2id$v=19$m=65536,t=3,p=4$m1kTNzwRy6Mi0UQ56oZpRw$Y7Xl0buKf9S2VQhyiArxkmuGRRIix9G5FglxW6446Ec
+    email: umanager@localhost.test
+    groups:
+      - user_manager
+  pmanager:
+    disabled: false
+    displayname: Password Manager
+    password: $argon2id$v=19$m=65536,t=3,p=4$m1kTNzwRy6Mi0UQ56oZpRw$Y7Xl0buKf9S2VQhyiArxkmuGRRIix9G5FglxW6446Ec
+    email: pmanager@localhost.test
+    groups:
+      - password_manager
+  test:
+    disabled: false
+    displayname: test creation of user
+    password: $argon2id$v=19$m=65536,p=4,t=3$cMZYJCiHr1WtRiSGGffkPQ$b2XJwKMZiQ0rzcXxGzqItGHzPyEs/WhO82P+LzLnoZ4
+    email: test@localhost.test
+    groups:
+      - group1
