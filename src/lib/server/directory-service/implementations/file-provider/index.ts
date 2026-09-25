@@ -29,9 +29,10 @@ const NOT_IMPLEMENTED = 'This operation is not yet supported for the Authelia fi
  * Directory service backed by Authelia's file authentication backend
  * (a YAML users database, e.g. users_database.yml).
  *
- * Browsing users and groups, and changing a user's group membership, are
- * supported. Creating/updating/deleting users or groups, and changing
- * passwords, are not yet implemented.
+ * Browsing users and groups, editing a user's email/display name/disabled
+ * flag, and changing group membership are supported. Creating/deleting users,
+ * creating/updating/deleting groups, and changing passwords are not yet
+ * implemented.
  */
 export class FileProviderService implements IDirectoryService {
 	private config: FileProviderConfig;
@@ -125,8 +126,31 @@ export class FileProviderService implements IDirectoryService {
 		throw new Error(NOT_IMPLEMENTED);
 	}
 
-	async updateUser(_input: UpdateUserInput): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async updateUser(input: UpdateUserInput): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			const entry = db.users?.[input.id];
+			if (!entry) {
+				return { success: false, error: `User "${input.id}" not found` };
+			}
+
+			// Custom attributes (insertAttributes/removeAttributes) are not
+			// supported by the file provider, which has a fixed field set;
+			// they are silently ignored here, matching the empty attribute
+			// schema returned by getUserAttributesSchema().
+			if (input.email !== undefined) {
+				entry.email = input.email;
+			}
+			if (input.displayName !== undefined) {
+				entry.displayname = input.displayName;
+			}
+			if (input.disabled !== undefined) {
+				entry.disabled = input.disabled;
+			}
+
+			await this.writeDatabase(db);
+			return { success: true };
+		});
 	}
 
 	async deleteUser(_userId: string): Promise<OperationResult> {

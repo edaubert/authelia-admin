@@ -359,6 +359,8 @@
   "user_edit_button_cancel": "Cancel",
   "user_edit_button_save": "Save Changes",
   "user_edit_button_saving": "Saving...",
+  "user_edit_disabled_hint": "A disabled user cannot log in to Authelia.",
+  "user_edit_disabled_label": "Account disabled",
   "user_edit_displayname_label": "Display Name",
   "user_edit_displayname_placeholder": "John Doe",
   "user_edit_email_label": "Email",

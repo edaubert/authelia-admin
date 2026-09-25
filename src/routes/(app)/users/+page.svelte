@@ -63,6 +63,11 @@
 									</td>
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
 										{user.displayName || '-'}
+										{#if user.disabled}
+											<span class="ml-2 px-2 py-0.5 text-xs rounded bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
+												{m.user_edit_disabled_label()}
+											</span>
+										{/if}
 									</td>
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
 										{#if user.email}

@@ -47,7 +47,14 @@
 
 <div class="space-y-6">
 	<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-		<h1 class="text-2xl font-bold text-gray-900 dark:text-white">{m.user_detail_title()}</h1>
+		<h1 class="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
+			{m.user_detail_title()}
+			{#if data.user?.disabled}
+				<span class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
+					{m.user_edit_disabled_label()}
+				</span>
+			{/if}
+		</h1>
 		<div class="flex gap-2">
 			{#if data.canDeleteUser}
 				<button

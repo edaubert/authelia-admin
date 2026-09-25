@@ -106,9 +106,10 @@ export class AccessService implements IAccessService {
             };
         }
 
-        // 2. Check if user is in the 'disabled' group
+        // 2. Check if user is disabled (native 'disabled' flag, e.g. file
+        // provider, or the LLDAP 'disabled' group convention)
         const groups = user.groups.map((g) => g.displayName);
-        if (this.isUserDisabled(groups)) {
+        if (user.disabled === true || this.isUserDisabled(groups)) {
             log.debug(`Access denied: user ${userId} is disabled`);
             return {
                 allowed: false,

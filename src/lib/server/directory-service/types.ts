@@ -24,12 +24,14 @@ export interface User {
 	creationDate: Date;
 	groups: GroupSummary[]; // Groups user belongs to
 	attributes: AttributeValue[];
+	disabled?: boolean; // Undefined if the backend doesn't support this concept
 }
 
 export interface UserSummary {
 	id: string;
 	email: string;
 	displayName: string;
+	disabled?: boolean; // Undefined if the backend doesn't support this concept
 }
 
 /**
@@ -66,6 +68,7 @@ export interface UpdateUserInput {
 	id: string; // Required: user to update
 	email?: string;
 	displayName?: string;
+	disabled?: boolean; // Ignored by backends that don't support this concept
 	removeAttributes?: string[]; // Attribute names to remove
 	insertAttributes?: AttributeValue[];
 }

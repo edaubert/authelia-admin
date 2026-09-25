@@ -13,7 +13,8 @@ export function mapUserSummary(id: string, entry: FileProviderUserEntry): UserSu
 	return {
 		id,
 		email: entry.email ?? '',
-		displayName: entry.displayname ?? id
+		displayName: entry.displayname ?? id,
+		disabled: entry.disabled ?? false
 	};
 }
 
@@ -32,6 +33,7 @@ export function mapUser(id: string, entry: FileProviderUserEntry): User {
 		uuid: id,
 		creationDate: new Date(0),
 		groups: mapGroups(entry.groups),
-		attributes: []
+		attributes: [],
+		disabled: entry.disabled ?? false
 	};
 }

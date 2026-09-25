@@ -25,6 +25,7 @@
 	let displayName = data.user?.displayName || '';
 	let firstName = getAttributeValue('first_name');
 	let lastName = getAttributeValue('last_name');
+	let disabled = data.user?.disabled ?? false;
 
 	// UI state
 	let isSubmitting = false;
@@ -181,6 +182,27 @@
 							/>
 						</div>
 					</div>
+
+					<!-- Disabled (only shown when the backend supports this concept) -->
+					{#if data.user.disabled !== undefined}
+						<div>
+							<input type="hidden" name="disabledSupported" value="1" />
+							<label class="flex items-center gap-2">
+								<input
+									type="checkbox"
+									name="disabled"
+									bind:checked={disabled}
+									class="h-4 w-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+								/>
+								<span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+									{m.user_edit_disabled_label()}
+								</span>
+							</label>
+							<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+								{m.user_edit_disabled_hint()}
+							</p>
+						</div>
+					{/if}
 
 					<!-- Action Buttons -->
 					<div class="flex flex-col sm:flex-row gap-3 pt-4 border-t border-gray-200 dark:border-gray-700">

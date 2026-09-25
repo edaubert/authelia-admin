@@ -359,6 +359,8 @@
   "user_edit_button_cancel": "Отмена",
   "user_edit_button_save": "Сохранить изменения",
   "user_edit_button_saving": "Сохранение...",
+  "user_edit_disabled_hint": "Отключённый пользователь не может войти в Authelia.",
+  "user_edit_disabled_label": "Учётная запись отключена",
   "user_edit_displayname_label": "Отображаемое имя",
   "user_edit_displayname_placeholder": "Иван Иванов",
   "user_edit_email_label": "Email",

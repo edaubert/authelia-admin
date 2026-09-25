@@ -107,6 +107,8 @@ export const actions: Actions = {
             const email = formData.get('email')?.toString()?.trim() || '';
             const firstName = formData.get('firstName')?.toString()?.trim() || '';
             const lastName = formData.get('lastName')?.toString()?.trim() || '';
+            const disabledSubmitted = formData.has('disabledSupported');
+            const disabled = formData.get('disabled') === 'on';
 
             // Validate email
             if (email && !isValidEmail(email)) {
@@ -118,6 +120,10 @@ export const actions: Actions = {
                 id: userid,
                 email: email ? sanitizeString(email, 255) : undefined,
                 displayName: displayName ? sanitizeString(displayName, 255) : undefined,
+                // Only set disabled if the checkbox was rendered (i.e. the
+                // backend supports it), signalled by the disabledSupported
+                // hidden field - an unchecked checkbox submits nothing.
+                disabled: disabledSubmitted ? disabled : undefined,
                 insertAttributes: []
             };
 
