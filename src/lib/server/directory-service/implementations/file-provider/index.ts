@@ -16,7 +16,7 @@ import type {
 } from '../../types';
 import type { FileProviderConfig } from '../../config';
 import type { FileProviderDatabase, FileProviderUserEntry } from './types';
-import { mapUser, mapUserSummary, mapUserWithGroups } from './mappers';
+import { mapGroupSummary, mapUser, mapUserSummary, mapUserWithGroups } from './mappers';
 import { createLogger } from '../../../logger';
 
 const log = createLogger('file-provider');
@@ -27,8 +27,8 @@ const NOT_IMPLEMENTED = 'This operation is not yet supported for the Authelia fi
  * Directory service backed by Authelia's file authentication backend
  * (a YAML users database, e.g. users_database.yml).
  *
- * Currently read-only: only browsing users is supported. Create/update/delete
- * and group management are not yet implemented.
+ * Currently read-only: browsing users and groups is supported, but
+ * create/update/delete and group membership changes are not yet implemented.
  */
 export class FileProviderService implements IDirectoryService {
 	private config: FileProviderConfig;
@@ -103,8 +103,11 @@ export class FileProviderService implements IDirectoryService {
 	}
 
 	// === Group operations ===
-	// The file provider has no first-class group objects: groups are just
-	// names referenced in each user's `groups` list. Not yet implemented.
+	// The file provider has no first-class group objects: a group is just a
+	// name referenced in one or more users' `groups` list. Groups are derived
+	// from that union, so they have no independent id, attributes, or creation
+	// date. Creating/renaming/deleting a group as such is not yet implemented
+	// (see addUserToGroup/removeUserFromGroup for membership changes).
 
 	async createGroup(_input: CreateGroupInput): Promise<Group> {
 		throw new Error(NOT_IMPLEMENTED);
@@ -119,11 +122,30 @@ export class FileProviderService implements IDirectoryService {
 	}
 
 	async listGroups(): Promise<GroupSummary[]> {
-		return [];
+		const entries = await this.listEntries();
+		const names = new Set<string>();
+		for (const [, entry] of entries) {
+			for (const group of entry.groups ?? []) {
+				names.add(group);
+			}
+		}
+		return [...names].sort((a, b) => a.localeCompare(b)).map(mapGroupSummary);
 	}
 
-	async getGroupDetails(_groupId: string): Promise<Group | null> {
-		return null;
+	async getGroupDetails(groupId: string): Promise<Group | null> {
+		const entries = await this.listEntries();
+		const members = entries.filter(([, entry]) => (entry.groups ?? []).includes(groupId));
+		if (members.length === 0) {
+			return null;
+		}
+
+		return {
+			id: groupId,
+			displayName: groupId,
+			creationDate: new Date(0),
+			members: members.map(([id, entry]) => mapUserSummary(id, entry)),
+			attributes: []
+		};
 	}
 
 	// === Membership operations ===
