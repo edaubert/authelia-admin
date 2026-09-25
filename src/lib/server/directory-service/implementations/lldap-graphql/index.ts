@@ -411,6 +411,14 @@ export class LLDAPGraphQLService implements IDirectoryService {
 			return { success: false, error: (error as Error).message };
 		}
 	}
+
+	// === Capabilities ===
+
+	groupsArePersistent(): boolean {
+		// LLDAP groups are first-class objects (stable uuid, own attributes)
+		// that can exist with zero members.
+		return true;
+	}
 }
 
 // Re-export for convenience

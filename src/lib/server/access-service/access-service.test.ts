@@ -71,6 +71,7 @@ function createMockDirectoryService(
 		getUserAttributesSchema: vi.fn(),
 		getGroupAttributesSchema: vi.fn(),
 		testConnection: vi.fn(),
+		groupsArePersistent: vi.fn(() => true),
 	};
 }
 

@@ -126,4 +126,19 @@ export interface IDirectoryService {
 
 	// Connection test
 	testConnection(): Promise<OperationResult>;
+
+	/**
+	 * Whether groups are first-class objects that persist independently of
+	 * their members (e.g. LLDAP: a group has a stable id/uuid and can exist
+	 * with zero members). False for backends where a group is just a label
+	 * derived from member references (e.g. the file provider: a group is
+	 * only "there" because some user lists it, so it has no existence of its
+	 * own to keep once it has no members, and deleting it IS removing it
+	 * from every member).
+	 *
+	 * Callers use this to decide whether "delete a group with members" should
+	 * be blocked (persistent groups) or is simply how deletion works
+	 * (non-persistent groups).
+	 */
+	groupsArePersistent(): boolean;
 }

@@ -30,9 +30,10 @@ const NOT_IMPLEMENTED = 'This operation is not yet supported for the Authelia fi
  * (a YAML users database, e.g. users_database.yml).
  *
  * Browsing users and groups, editing a user's email/display name/disabled
- * flag, and changing group membership are supported. Creating/deleting users,
- * creating/updating/deleting groups, and changing passwords are not yet
- * implemented.
+ * flag, deleting a user, changing group membership, and renaming/deleting a
+ * group (as a bulk update across its members) are supported. Creating users
+ * (requires password hashing, see changePassword) and creating a group with
+ * no members (nothing to persist) are not.
  */
 export class FileProviderService implements IDirectoryService {
 	private config: FileProviderConfig;
@@ -123,7 +124,13 @@ export class FileProviderService implements IDirectoryService {
 	}
 
 	async createUser(_input: CreateUserInput): Promise<User> {
-		throw new Error(NOT_IMPLEMENTED);
+		// Every entry in the file provider's database must have a password
+		// hash matching Authelia's configured algorithm/parameters, or the
+		// whole file fails to load on next reload - locking out every user,
+		// not just the new one. CreateUserInput carries no password, and
+		// hashing isn't implemented yet (see changePassword), so creation is
+		// deliberately refused rather than writing an invalid entry.
+		throw new Error(`${NOT_IMPLEMENTED} (requires password hashing support)`);
 	}
 
 	async updateUser(input: UpdateUserInput): Promise<OperationResult> {
@@ -153,8 +160,17 @@ export class FileProviderService implements IDirectoryService {
 		});
 	}
 
-	async deleteUser(_userId: string): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async deleteUser(userId: string): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			if (!db.users?.[userId]) {
+				return { success: false, error: `User "${userId}" not found` };
+			}
+
+			delete db.users[userId];
+			await this.writeDatabase(db);
+			return { success: true };
+		});
 	}
 
 	async changePassword(_userId: string, _newPassword: string): Promise<OperationResult> {
@@ -163,21 +179,67 @@ export class FileProviderService implements IDirectoryService {
 
 	// === Group operations ===
 	// The file provider has no first-class group objects: a group is just a
-	// name referenced in one or more users' `groups` list. Groups are derived
-	// from that union, so they have no independent id, attributes, or creation
-	// date. Creating/renaming/deleting a group as such is not yet implemented;
-	// see addUserToGroup/removeUserFromGroup below for membership changes.
+	// name referenced in one or more users' `groups` list, with no independent
+	// id, attributes, or creation date. There is nowhere to persist a group
+	// that has no members, so createGroup (which starts a group with zero
+	// members) has no meaningful effect here - add the first member with
+	// addUserToGroup instead, which implicitly "creates" the group name.
+	// updateGroup and deleteGroup, however, are well-defined as bulk
+	// rename/removal of that name across every user who has it.
 
 	async createGroup(_input: CreateGroupInput): Promise<Group> {
-		throw new Error(NOT_IMPLEMENTED);
+		throw new Error(
+			`${NOT_IMPLEMENTED} (a group with no members can't be represented; use addUserToGroup instead)`
+		);
 	}
 
-	async updateGroup(_input: UpdateGroupInput): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async updateGroup(input: UpdateGroupInput): Promise<OperationResult> {
+		const newName = input.displayName;
+		if (!newName || newName === input.id) {
+			return { success: true };
+		}
+
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			const entries = Object.entries(db.users ?? {});
+			let changed = false;
+
+			for (const [, entry] of entries) {
+				if (entry.groups?.includes(input.id)) {
+					entry.groups = [...new Set(entry.groups.map((g) => (g === input.id ? newName : g)))];
+					changed = true;
+				}
+			}
+
+			if (!changed) {
+				return { success: false, error: `Group "${input.id}" not found` };
+			}
+
+			await this.writeDatabase(db);
+			return { success: true };
+		});
 	}
 
-	async deleteGroup(_groupId: string): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async deleteGroup(groupId: string): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			const entries = Object.entries(db.users ?? {});
+			let changed = false;
+
+			for (const [, entry] of entries) {
+				if (entry.groups?.includes(groupId)) {
+					entry.groups = entry.groups.filter((g) => g !== groupId);
+					changed = true;
+				}
+			}
+
+			if (!changed) {
+				return { success: false, error: `Group "${groupId}" not found` };
+			}
+
+			await this.writeDatabase(db);
+			return { success: true };
+		});
 	}
 
 	async listGroups(): Promise<GroupSummary[]> {
@@ -263,5 +325,14 @@ export class FileProviderService implements IDirectoryService {
 			log.warn(`File provider connection test failed: ${(error as Error).message}`);
 			return { success: false, error: (error as Error).message };
 		}
+	}
+
+	// === Capabilities ===
+
+	groupsArePersistent(): boolean {
+		// A file-provider group is just a name referenced by its members; it
+		// has no existence once it has none, and deleting it means removing
+		// it from every member.
+		return false;
 	}
 }

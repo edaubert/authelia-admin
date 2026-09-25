@@ -18,6 +18,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
             config.directory.type as DirectoryServiceType
         );
 
+        const groupsArePersistent = directoryService.groupsArePersistent();
         const group = await directoryService.getGroupDetails(groupid);
 
         if (!group) {
@@ -29,7 +30,8 @@ export const load: PageServerLoad = async ({ params, locals }) => {
                 canAddMembers: false,
                 canRemoveMembers: false,
                 allUsers: [],
-                userPermissions: {}
+                userPermissions: {},
+                groupsArePersistent
             };
         }
 
@@ -99,7 +101,8 @@ export const load: PageServerLoad = async ({ params, locals }) => {
             canAddMembers,
             canRemoveMembers,
             allUsers,
-            userPermissions
+            userPermissions,
+            groupsArePersistent
         };
 
     } catch (error) {
@@ -112,7 +115,11 @@ export const load: PageServerLoad = async ({ params, locals }) => {
             canAddMembers: false,
             canRemoveMembers: false,
             allUsers: [],
-            userPermissions: {}
+            userPermissions: {},
+            // Unknown at this point (the failure may be before the directory
+            // service was available) - default to the conservative/safe
+            // assumption so deletion stays blocked rather than allowed.
+            groupsArePersistent: true
         };
     }
 };
@@ -142,10 +149,16 @@ export const actions: Actions = {
                 return fail(403, { error: m.group_delete_no_permission() });
             }
 
-            // Check if group has members
-            const group = await directoryService.getGroupDetails(groupid);
-            if (group && group.members && group.members.length > 0) {
-                return fail(400, { error: m.group_delete_has_members() });
+            // Persistent groups (e.g. LLDAP) are real objects that would be
+            // orphaned by deleting them while still referenced, so members
+            // must be removed first. Non-persistent groups (e.g. the file
+            // provider) have no existence apart from their members, so
+            // deleting one simply means removing it from all of them.
+            if (directoryService.groupsArePersistent()) {
+                const group = await directoryService.getGroupDetails(groupid);
+                if (group && group.members && group.members.length > 0) {
+                    return fail(400, { error: m.group_delete_has_members() });
+                }
             }
 
             const result = await directoryService.deleteGroup(groupid);

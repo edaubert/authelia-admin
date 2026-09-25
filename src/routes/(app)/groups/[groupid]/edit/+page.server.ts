@@ -83,28 +83,36 @@ export const actions: Actions = {
             }
 
             const formData = await request.formData();
-            const displayName = formData.get('displayName')?.toString()?.trim() || '';
+            const displayNameInput = formData.get('displayName')?.toString()?.trim() || '';
 
             // Validate display name
-            if (!displayName) {
+            if (!displayNameInput) {
                 return fail(400, { error: m.validation_displayname_required() });
             }
 
-            if (displayName.length > 255) {
+            if (displayNameInput.length > 255) {
                 return fail(400, { error: m.validation_displayname_required() });
             }
 
+            const displayName = sanitizeString(displayNameInput, 255);
             const result = await directoryService.updateGroup({
                 id: groupid,
-                displayName: sanitizeString(displayName, 255)
+                displayName
             });
 
             if (!result.success) {
                 return fail(500, { error: result.error || m.group_update_failed() });
             }
 
-            // Redirect to group detail page after successful update
-            throw redirect(303, `${base}/groups/${groupid}`);
+            // The group's id is normally stable (e.g. a UUID for LLDAP), so
+            // the old URL still resolves after a rename. But for backends
+            // where the id and displayName are the same string (e.g. the
+            // file provider), a rename also changes the id - detect that by
+            // checking whether the old id still resolves, and redirect to
+            // the new displayName instead if not.
+            const stillExists = await directoryService.getGroupDetails(groupid);
+            const redirectId = stillExists ? groupid : displayName;
+            throw redirect(303, `${base}/groups/${encodeURIComponent(redirectId)}`);
 
         } catch (error) {
             // Re-throw redirects

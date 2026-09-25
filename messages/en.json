@@ -163,6 +163,7 @@
   "group_delete_failed": "Failed to delete group",
   "group_delete_has_members": "Cannot delete group that has members. Remove all members first.",
   "group_delete_no_permission": "You do not have permission to delete this group",
+  "group_delete_removes_members_hint": "This group has {count} member(s). Deleting it will remove it from all of them.",
   "group_detail_add_user_hint": "Click to add user to group",
   "group_detail_available_users": "Available Users",
   "group_detail_available_users_hint": "Click to add users to this group",

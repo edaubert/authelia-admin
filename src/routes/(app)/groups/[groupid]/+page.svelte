@@ -17,13 +17,17 @@
 	$: memberIds = new Set(data.group?.members?.map(m => m.id) || []);
 	$: availableUsers = (data.allUsers || []).filter(u => !memberIds.has(u.id));
 	$: hasMembers = data.group?.members && data.group.members.length > 0;
+	// Persistent groups (e.g. LLDAP) must be emptied before deletion; for
+	// non-persistent ones (e.g. the file provider) deletion simply means
+	// removing the group from all its members, so it's always allowed.
+	$: blocksDeleteWhileHasMembers = hasMembers && data.groupsArePersistent;
 </script>
 
 <div class="space-y-6">
 	<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
 		<h1 class="text-2xl font-bold text-gray-900 dark:text-white">{m.group_detail_title()}</h1>
 		<div class="flex gap-2">
-			{#if data.canDeleteGroup && !hasMembers}
+			{#if data.canDeleteGroup && !blocksDeleteWhileHasMembers}
 				<button
 					on:click={() => (showDeleteConfirm = true)}
 					class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
@@ -74,9 +78,16 @@
 		<div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
 			<div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
 				<h3 class="text-lg font-bold text-gray-900 dark:text-white mb-4">{m.group_delete_confirm_title()}</h3>
-				<p class="text-gray-600 dark:text-gray-400 mb-6">
+				<p class="text-gray-600 dark:text-gray-400 mb-2">
 					{m.group_delete_confirm_text({ displayName: data.group?.displayName || '' })}
 				</p>
+				{#if hasMembers}
+					<p class="text-sm text-yellow-700 dark:text-yellow-400 mb-6">
+						{m.group_delete_removes_members_hint({ count: data.group?.members?.length || 0 })}
+					</p>
+				{:else}
+					<div class="mb-6"></div>
+				{/if}
 				<div class="flex gap-3 justify-end">
 					<button
 						on:click={() => (showDeleteConfirm = false)}
@@ -330,8 +341,8 @@
 			</div>
 		{/if}
 
-		<!-- Delete warning if group has members -->
-		{#if data.canDeleteGroup && hasMembers}
+		<!-- Delete warning if group has members (persistent-group backends only) -->
+		{#if data.canDeleteGroup && blocksDeleteWhileHasMembers}
 			<div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
 				<p class="text-yellow-800 dark:text-yellow-200 font-medium">
 					{m.group_detail_cannot_delete_has_members()}
