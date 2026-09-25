@@ -1,5 +1,7 @@
 import { promises as fs, constants as fsConstants } from 'node:fs';
-import { parse, YAMLParseError } from 'yaml';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { parse, stringify, YAMLParseError } from 'yaml';
 import type {
 	IDirectoryService,
 	User,
@@ -27,11 +29,16 @@ const NOT_IMPLEMENTED = 'This operation is not yet supported for the Authelia fi
  * Directory service backed by Authelia's file authentication backend
  * (a YAML users database, e.g. users_database.yml).
  *
- * Currently read-only: browsing users and groups is supported, but
- * create/update/delete and group membership changes are not yet implemented.
+ * Browsing users and groups, and changing a user's group membership, are
+ * supported. Creating/updating/deleting users or groups, and changing
+ * passwords, are not yet implemented.
  */
 export class FileProviderService implements IDirectoryService {
 	private config: FileProviderConfig;
+	// Serializes read-modify-write operations within this process; the file has
+	// no transaction support, so concurrent membership edits from this service
+	// must not interleave and clobber each other's changes.
+	private writeQueue: Promise<unknown> = Promise.resolve();
 
 	constructor(config: FileProviderConfig) {
 		this.config = config;
@@ -54,6 +61,34 @@ export class FileProviderService implements IDirectoryService {
 					: '';
 			throw new Error(`File provider database "${this.config.path}": invalid YAML${position}`);
 		}
+	}
+
+	/**
+	 * Atomically write the database: write to a temp file in the same
+	 * directory, then rename over the target. Avoids Authelia's file watcher
+	 * (or another reader) ever observing a partially-written file.
+	 */
+	private async writeDatabase(db: FileProviderDatabase): Promise<void> {
+		const dir = path.dirname(this.config.path);
+		const tempPath = path.join(dir, `.${path.basename(this.config.path)}.${randomUUID()}.tmp`);
+		const content = stringify(db);
+		try {
+			await fs.writeFile(tempPath, content, 'utf-8');
+			await fs.rename(tempPath, this.config.path);
+		} catch (error) {
+			await fs.rm(tempPath, { force: true });
+			throw new Error(`Cannot write file provider database "${this.config.path}": ${(error as Error).message}`);
+		}
+	}
+
+	/**
+	 * Serialize a read-modify-write operation against any other pending one
+	 * from this service instance, so concurrent edits don't interleave.
+	 */
+	private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.writeQueue.then(operation, operation);
+		this.writeQueue = result.catch(() => undefined);
+		return result;
 	}
 
 	private async listEntries(): Promise<[string, FileProviderUserEntry][]> {
@@ -106,8 +141,8 @@ export class FileProviderService implements IDirectoryService {
 	// The file provider has no first-class group objects: a group is just a
 	// name referenced in one or more users' `groups` list. Groups are derived
 	// from that union, so they have no independent id, attributes, or creation
-	// date. Creating/renaming/deleting a group as such is not yet implemented
-	// (see addUserToGroup/removeUserFromGroup for membership changes).
+	// date. Creating/renaming/deleting a group as such is not yet implemented;
+	// see addUserToGroup/removeUserFromGroup below for membership changes.
 
 	async createGroup(_input: CreateGroupInput): Promise<Group> {
 		throw new Error(NOT_IMPLEMENTED);
@@ -150,12 +185,37 @@ export class FileProviderService implements IDirectoryService {
 
 	// === Membership operations ===
 
-	async addUserToGroup(_userId: string, _groupId: string): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async addUserToGroup(userId: string, groupId: string): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			const entry = db.users?.[userId];
+			if (!entry) {
+				return { success: false, error: `User "${userId}" not found` };
+			}
+
+			entry.groups = entry.groups ?? [];
+			if (!entry.groups.includes(groupId)) {
+				entry.groups.push(groupId);
+				await this.writeDatabase(db);
+			}
+			return { success: true };
+		});
 	}
 
-	async removeUserFromGroup(_userId: string, _groupId: string): Promise<OperationResult> {
-		return { success: false, error: NOT_IMPLEMENTED };
+	async removeUserFromGroup(userId: string, groupId: string): Promise<OperationResult> {
+		return this.runExclusive(async () => {
+			const db = await this.readDatabase();
+			const entry = db.users?.[userId];
+			if (!entry) {
+				return { success: false, error: `User "${userId}" not found` };
+			}
+
+			if (entry.groups?.includes(groupId)) {
+				entry.groups = entry.groups.filter((g) => g !== groupId);
+				await this.writeDatabase(db);
+			}
+			return { success: true };
+		});
 	}
 
 	// === Schema operations ===
