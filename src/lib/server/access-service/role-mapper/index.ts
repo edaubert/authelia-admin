@@ -6,6 +6,7 @@ export { BaseRoleMapper } from './base-role-mapper';
 
 // Implementations
 export { LLDAPRoleMapper, LLDAP_DEFAULT_CONFIG } from './implementations/lldap-role-mapper';
+export { FileProviderRoleMapper, FILE_PROVIDER_DEFAULT_CONFIG } from './implementations/file-role-mapper';
 
 // Factory
 export { RoleMapperFactory, type DirectoryServiceType } from './factory';

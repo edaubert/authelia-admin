@@ -19,18 +19,19 @@ export type {
 } from './types';
 
 // Configuration types
-export type { LLDAPGraphQLConfig, ServiceConfig } from './config';
-export { createLLDAPConfig } from './config';
+export type { LLDAPGraphQLConfig, FileProviderConfig, ServiceConfig } from './config';
+export { createLLDAPConfig, createFileProviderConfig } from './config';
 
 // Factory
 export { DirectoryServiceFactory } from './factory';
 
 // Implementations (for direct use if needed)
 export { LLDAPGraphQLService, LLDAPGraphQLClient } from './implementations/lldap-graphql';
+export { FileProviderService } from './implementations/file-provider';
 
 // Singleton management
 import type { IDirectoryService } from './types';
-import type { LLDAPGraphQLConfig } from './config';
+import type { ServiceConfig } from './config';
 import { getConfigAsync } from '../config';
 import { DirectoryServiceFactory } from './factory';
 
@@ -55,12 +56,12 @@ export async function initDirectoryService(): Promise<IDirectoryService> {
 		try {
 			const appConfig = await getConfigAsync();
 
-			// Transform nested directory config to flat LLDAPGraphQLConfig
+			// Transform nested directory config to a flat ServiceConfig per type
 			const directoryConfig = appConfig.directory;
-			const serviceConfig: LLDAPGraphQLConfig = {
-				type: directoryConfig.type,
-				...directoryConfig['lldap-graphql']
-			};
+			const serviceConfig: ServiceConfig =
+				directoryConfig.type === 'file'
+					? { type: 'file', ...directoryConfig.file! }
+					: { type: 'lldap-graphql', ...directoryConfig['lldap-graphql']! };
 
 			directoryServiceInstance = DirectoryServiceFactory.create(serviceConfig);
 			return directoryServiceInstance;

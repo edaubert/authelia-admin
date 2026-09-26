@@ -32,10 +32,13 @@ export interface LLDAPGraphQLConfigFields {
 	ldap_base_dn?: string;
 }
 
-export interface DirectoryConfig {
-	type: 'lldap-graphql';
-	'lldap-graphql': LLDAPGraphQLConfigFields;
+export interface FileProviderConfigFields {
+	path: string;
 }
+
+export type DirectoryConfig =
+	| { type: 'lldap-graphql'; 'lldap-graphql': LLDAPGraphQLConfigFields }
+	| { type: 'file'; file: FileProviderConfigFields };
 
 export interface AppConfig {
 	authelia: AutheliaConfig;
@@ -94,7 +97,7 @@ export async function loadConfig(
 
 			configInstance = {
 				authelia: parseAutheliaConfig(parsed?.authelia),
-				directory: parseDirectoryConfig(parsed?.directory),
+				directory: await parseDirectoryConfig(parsed?.directory),
 				logging_level: loggingLevel
 			};
 
@@ -105,7 +108,7 @@ export async function loadConfig(
 				log.warn(
 					`Configuration file not found at ${configPath}, using defaults and environment variables`
 				);
-				configInstance = loadFromEnvironment();
+				configInstance = await loadFromEnvironment();
 				return configInstance;
 			}
 			throw new Error(`Failed to load configuration: ${(error as Error).message}`);
@@ -167,12 +170,19 @@ function parseAutheliaConfig(config: unknown): AutheliaConfig {
 	return { domain, cookie_name, min_auth_level, allowed_users };
 }
 
-function parseDirectoryConfig(config: unknown): DirectoryConfig {
+async function parseDirectoryConfig(config: unknown): Promise<DirectoryConfig> {
 	const cfg = (config && typeof config === 'object') ? config as Record<string, unknown> : {};
 
 	// Get type from env var or config
 	const type = process.env.AAD_DIRECTORY_TYPE ||
 		substituteEnvVars(String(cfg.type || 'lldap-graphql'));
+
+	if (type === 'file') {
+		return {
+			type: 'file',
+			file: await parseFileProviderConfig(cfg.file)
+		};
+	}
 
 	if (type !== 'lldap-graphql') {
 		throw new Error(`Unsupported directory type: ${type}`);
@@ -185,6 +195,62 @@ function parseDirectoryConfig(config: unknown): DirectoryConfig {
 		type: 'lldap-graphql',
 		'lldap-graphql': lldapConfig
 	};
+}
+
+/**
+ * Resolve the file provider's users database path.
+ * Uses AAD_DIRECTORY_FILE_PATH / directory.file.path if set, otherwise falls
+ * back to reading `authentication_backend.file.path` from Authelia's own
+ * configuration.yml (same file consulted for the storage backend).
+ */
+async function parseFileProviderConfig(config: unknown): Promise<FileProviderConfigFields> {
+	const cfg = (config && typeof config === 'object') ? config as Record<string, unknown> : {};
+
+	const explicitPath = process.env.AAD_DIRECTORY_FILE_PATH ||
+		(cfg.path ? substituteEnvVars(String(cfg.path)) : undefined);
+
+	const path = explicitPath || (await readAutheliaFileProviderPath());
+	if (!path) {
+		throw new Error(
+			'Directory file provider path is not configured. Set AAD_DIRECTORY_FILE_PATH, directory.file.path, ' +
+			'or authentication_backend.file.path in the Authelia configuration.'
+		);
+	}
+
+	return { path };
+}
+
+const DEFAULT_AUTHELIA_CONFIG_PATH = '/config/configuration.yml';
+
+async function readAutheliaFileProviderPath(): Promise<string | undefined> {
+	const autheliaConfigPath = process.env.AAD_AUTHELIA_CONFIG_PATH ||
+		process.env.AUTHELIA_CONFIG_PATH ||
+		DEFAULT_AUTHELIA_CONFIG_PATH;
+
+	let content: string;
+	try {
+		content = await fs.readFile(autheliaConfigPath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return undefined;
+		}
+		throw new Error(
+			`Failed to read Authelia configuration "${autheliaConfigPath}" for file provider path: ${(error as Error).message}`
+		);
+	}
+
+	const parsed = parse(content);
+	const filePath = (parsed && typeof parsed === 'object')
+		? (parsed as Record<string, unknown>).authentication_backend
+		: undefined;
+	const path = (filePath && typeof filePath === 'object')
+		? (filePath as Record<string, unknown>).file
+		: undefined;
+	const resolvedPath = (path && typeof path === 'object')
+		? (path as Record<string, unknown>).path
+		: undefined;
+
+	return typeof resolvedPath === 'string' && resolvedPath.length > 0 ? resolvedPath : undefined;
 }
 
 function parseLLDAPGraphQLConfig(config: unknown): LLDAPGraphQLConfigFields {
@@ -231,13 +297,13 @@ function parseAllowedUsers(users: unknown): string[] {
 
 // === Environment Variable Fallbacks ===
 
-function loadFromEnvironment(): AppConfig {
+async function loadFromEnvironment(): Promise<AppConfig> {
 	const loggingLevel = parseLoggingLevel(undefined);
 	setLogLevel(loggingLevel);
 
 	return {
 		authelia: parseAutheliaConfig({}),
-		directory: parseDirectoryConfig({}),
+		directory: await parseDirectoryConfig({}),
 		logging_level: loggingLevel
 	};
 }

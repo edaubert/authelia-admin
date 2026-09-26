@@ -13,10 +13,15 @@ export interface LLDAPGraphQLConfig {
 	ldap_base_dn?: string;
 }
 
+export interface FileProviderConfig {
+	type: 'file';
+	path: string; // Path to Authelia's file-provider users database YAML file
+}
+
 // Future: Add other config types
 // export interface ActiveDirectoryConfig { ... }
 
-export type ServiceConfig = LLDAPGraphQLConfig; // | ActiveDirectoryConfig | ...
+export type ServiceConfig = LLDAPGraphQLConfig | FileProviderConfig; // | ActiveDirectoryConfig | ...
 
 /**
  * Create a config object directly without loading from file.
@@ -39,4 +44,12 @@ export function createLLDAPConfig(
 		ldap_port,
 		ldap_base_dn
 	};
+}
+
+/**
+ * Create a file-provider config object directly without loading from file.
+ * Useful for testing or programmatic configuration.
+ */
+export function createFileProviderConfig(path: string): FileProviderConfig {
+	return { type: 'file', path };
 }

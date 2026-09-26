@@ -1,6 +1,7 @@
 import type { IDirectoryService } from "./types";
 import type { ServiceConfig } from "./config";
 import { LLDAPGraphQLService } from "./implementations/lldap-graphql";
+import { FileProviderService } from "./implementations/file-provider";
 
 /**
  * Factory for creating directory service instances.
@@ -18,8 +19,10 @@ export class DirectoryServiceFactory {
 		switch (config.type) {
 			case "lldap-graphql":
 				return new LLDAPGraphQLService(config);
+			case "file":
+				return new FileProviderService(config);
 			default:
-				throw new Error(`Unsupported directory service type: ${config.type}`);
+				throw new Error(`Unsupported directory service type: ${(config as ServiceConfig).type}`);
 		}
 	}
 }

@@ -1,10 +1,11 @@
 import type { IRoleMapper, RoleMapperConfig } from './types';
 import { LLDAPRoleMapper } from './implementations/lldap-role-mapper';
+import { FileProviderRoleMapper } from './implementations/file-role-mapper';
 
 /**
  * Supported directory service types for role mapping
  */
-export type DirectoryServiceType = 'lldap-graphql';
+export type DirectoryServiceType = 'lldap-graphql' | 'file';
 
 /**
  * Factory for creating role mappers based on directory service type
@@ -19,6 +20,9 @@ export class RoleMapperFactory {
         switch (type) {
             case 'lldap-graphql':
                 return new LLDAPRoleMapper(config);
+
+            case 'file':
+                return new FileProviderRoleMapper(config);
 
             default:
                 throw new Error(`Unsupported directory service type: ${type}`);
