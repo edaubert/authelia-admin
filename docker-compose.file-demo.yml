@@ -1,0 +1,51 @@
+networks:
+  authelia:
+    external: true
+    name: authelia
+
+services:
+  authelia:
+    networks:
+      authelia:
+        aliases:
+          - authelia
+    image: 'docker.io/authelia/authelia:4.39.6'
+    container_name: 'authelia'
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    volumes:
+      - './test-configs/authelia-file:/config'
+      - './.test-data/authelia-file:/data'
+      - '/var/log/authelia:/var/log/authelia'
+    environment:
+      - TZ=UTC
+      - AUTHELIA_LOG_LEVEL=debug
+      - AUTHELIA_LOG_FORMAT=json
+      - AUTHELIA_LOG_FILE_PATH=/var/log/authelia/authelia.log
+      - AUTHELIA_LOG_KEEP_STDOUT=true
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9091/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  traefik:
+    image: "docker.io/traefik:latest"
+    networks:
+      authelia:
+        aliases:
+          - auth.localhost.test
+    container_name: "traefik"
+    restart: "unless-stopped"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "--configfile=/etc/traefik/traefik.yml"
+    ports:
+      - "0.0.0.0:443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./test-configs/traefik:/etc/traefik"
+      - "./test-configs/traefik/FileProvider:/FileProvider"
+      - "/var/log/traefik:/var/log/traefik"

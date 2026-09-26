@@ -1,0 +1,12 @@
+# Authelia Admin Configuration - file provider demo
+logging_level: DEBUG
+
+authelia:
+  domain: auth.localhost.test
+  cookie_name: authelia_session
+  min_auth_level: 1
+
+directory:
+  type: file
+  file:
+    path: /config/users_database.yml
