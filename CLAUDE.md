@@ -24,6 +24,7 @@ Authelia Admin Control Panel - A web-based administration interface for managing
 - View and manage TOTP configurations
 - View TOTP history
 - Management of users and groups in LLDAP
+- Browse and management of users in the Authelia file provider (`users_database.yml`)
 - Managemenent of banned users and IPs
 - Dedicated role for management of regular users (user_manager)
 - Dedicated role for  (user_manager)
@@ -34,7 +35,7 @@ Authelia Admin Control Panel - A web-based administration interface for managing
 
 - Management of attributes of users and groups
 - Management of users and groups via LDAP protocol
-- Browse and management of users in Authelia file provider
+- Group management (create/rename/delete) for the file provider is limited: there are no first-class group objects, so a group only exists as a name referenced by its members (see `directory-service/implementations/file-provider`)
 
 ## Development Commands
 
@@ -176,12 +177,15 @@ AAD_AUTHELIA_MIN_AUTH_LEVEL=2                    # Min auth level (1=password, 2
 AAD_AUTHELIA_ALLOWED_USERS=admin,user2           # Comma-separated allowed users, optional
 
 # Directory Service (LLDAP GraphQL)
-AAD_DIRECTORY_TYPE=lldap-graphql                 # Directory service type
+AAD_DIRECTORY_TYPE=lldap-graphql                 # Directory service type: lldap-graphql | file
 AAD_DIRECTORY_LLDAP_GRAPHQL_ENDPOINT=http://lldap:17170/api/graphql
 AAD_DIRECTORY_LLDAP_GRAPHQL_USER=admin           # LLDAP admin username
 AAD_DIRECTORY_LLDAP_GRAPHQL_PASSWORD=secret      # LLDAP admin password
 AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST=lldap      # LDAP host for password changes
 AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT=3890       # LDAP port for password changes
+
+# Directory Service (Authelia file provider) - set AAD_DIRECTORY_TYPE=file to use this instead
+# path/password settings must be configured via config.yml (see README), not AAD_ env vars
 
 # Database (override Authelia configuration.yml storage section per key; see README)
 AAD_AUTHELIA_CONFIG_PATH=/config/configuration.yml
@@ -242,12 +246,16 @@ src/lib/server/directory-service/
 ├── config.ts             # Configuration types for backends
 ├── factory.ts            # Service factory for creating instances
 └── implementations/
-    └── lldap-graphql/    # LLDAP GraphQL implementation
-        ├── index.ts      # LLDAPGraphQLService class
-        ├── client.ts     # GraphQL client with token management
-        ├── queries.ts    # GraphQL queries
-        ├── mutations.ts  # GraphQL mutations
-        └── mappers.ts    # Type converters (LLDAP <-> common types)
+    ├── lldap-graphql/    # LLDAP GraphQL implementation
+    │   ├── index.ts      # LLDAPGraphQLService class
+    │   ├── client.ts     # GraphQL client with token management
+    │   ├── queries.ts    # GraphQL queries
+    │   ├── mutations.ts  # GraphQL mutations
+    │   └── mappers.ts    # Type converters (LLDAP <-> common types)
+    └── file-provider/    # Authelia file provider implementation
+        ├── index.ts      # FileProviderService class (reads/writes users_database.yml)
+        ├── types.ts      # YAML database shape
+        └── mappers.ts    # Type converters (file entry <-> common types)
 ```
 
 **Usage:**
@@ -272,11 +280,41 @@ directory:
     ldap_port: 3890
 ```
 
+Or, for the Authelia file provider:
+```yaml
+directory:
+  type: file
+  file:
+    path: /config/users_database.yml   # must match Authelia's authentication_backend.file.path
+    password:
+      algorithm: argon2                # must match authentication_backend.file.password in Authelia's config
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        keyLength: 32
+        saltLength: 16
+```
+
 **Key design decisions:**
 - Group IDs are strings (UUIDs) at the interface level
 - LLDAP implementation maps internal numeric IDs to UUIDs
 - Thread-safe bearer token management with automatic refresh
 - Configuration supports both YAML and environment variables (AAD_ prefix)
+- File provider: groups are just names referenced by users (no first-class group object); `createGroup` with zero members is unsupported, use `addUserToGroup` to implicitly create one. Writes use optimistic concurrency control (mtime check + atomic rename) since Authelia itself may write to the same file (e.g. password resets).
+
+### Role Mapping (Admin/User Manager/Password Manager)
+
+Access to this application is restricted to users belonging to specific groups, mapped per directory backend in `src/lib/server/access-service/role-mapper/implementations/`:
+
+| Role | LLDAP group | File provider group |
+|------|-------------|----------------------|
+| Admin | `lldap_admin` | `admin` |
+| User manager | `authelia_user_manager` | `user_manager` |
+| Password manager | `lldap_password_manager` | `password_manager` |
+
+Group matching is case-insensitive. Users with none of these groups get a 403 "access denied" even if Authelia authentication succeeds.
 
 ### Internationalization (i18n)
 

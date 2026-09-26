@@ -1,12 +1,13 @@
 # Authelia Admin Control Panel
 
-A web-based administration interface for managing Authelia authentication server with LLDAP.
+A web-based administration interface for managing Authelia authentication server with LLDAP or the Authelia file provider.
 
 ![image](https://raw.githubusercontent.com/asalimonov/authelia-admin/refs/heads/main/public/authelia-admin.gif)
 
 ## Features
 
 - Management of users and groups in LLDAP
+- Browsing and management of users in the Authelia file provider (`users_database.yml`)
 - View and manage TOTP configurations
 - View TOTP history
 - Management of banned users and IPs
@@ -18,7 +19,7 @@ A web-based administration interface for managing Authelia authentication server
 ### Not yet implemented
 
 - Management of attributes of users and groups
-- Browsing and management of users in Authelia file provider
+- Group management (create/rename/delete) for the file provider is limited: there are no first-class group objects, a group only exists as a name referenced by its members
 
 ### How to run locally with PostgreSQL
 
@@ -35,12 +36,17 @@ Configuration can be provided via YAML file or environment variables. Environmen
 
 Don't forget to configure your load balancer. Authelia Admin CP should be accessible at `https://{{AAD_AUTHELIA_DOMAIN}}/auth-admin/`.
 
-Authelia Admin implements concept of protected users. **Protected users** are users which belong to the following groups: lldap_admin, lldap_password_manager, lldap_strict_readonly, authelia_user_manager. Only users with membership in lldap_admin can do anything with other protected users. Protected users are implemented to prevent access rights escalation.
+Authelia Admin implements concept of protected users. **Protected users** are users which belong to one of the role groups below. Only users with the admin role can do anything with other protected users. Protected users are implemented to prevent access rights escalation.
 
-Add your users of Authelia Admin in the following groups:
-- lldap_password_manager - can list users, groups and change password of not protected users
-- authelia_user_manager - lldap_password_manager access rights + can create, edit and delete users, can change memeberhip and password of non protected users
-- lldap_admin - full access rights
+Add your users of Authelia Admin to one of the following groups, matching your directory backend:
+
+| Role | LLDAP group | File provider group | Access |
+|------|-------------|----------------------|--------|
+| Password manager | `lldap_password_manager` | `password_manager` | Can list users, groups, and change the password of non-protected users |
+| User manager | `authelia_user_manager` | `user_manager` | Password manager access + create, edit, delete users, change membership and password of non-protected users |
+| Admin | `lldap_admin` | `admin` | Full access rights |
+
+Group name matching is case-insensitive. Users without one of these groups cannot access the application at all.
 
 ### Environment Variables
 
@@ -70,7 +76,11 @@ You need to specify only the following environment variables for a minimal insta
 | `AAD_AUTHELIA_MIN_AUTH_LEVEL` | Minimum auth level (1=password, 2=2FA) | `2` |
 | `AAD_AUTHELIA_ALLOWED_USERS` | Comma-separated list of allowed users | (empty = all users) |
 
-#### Directory Service (LLDAP GraphQL)
+#### Directory Service
+
+`AAD_DIRECTORY_TYPE` selects the backend: `lldap-graphql` (default) or `file`.
+
+##### LLDAP GraphQL
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -81,6 +91,13 @@ You need to specify only the following environment variables for a minimal insta
 | `AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST` | LDAP host for password changes | `lldap` |
 | `AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT` | LDAP port for password changes | `3890` |
 | `AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN` | LDAP base DN for user operations | (required for password changes) |
+
+##### Authelia file provider
+
+There are no `AAD_` environment variables for this backend; configure it via `config.yml` (see below). Set `AAD_DIRECTORY_TYPE=file` and provide a `directory.file` section:
+
+- `path` - path to Authelia's file-provider users database YAML (e.g. `users_database.yml`); must be the same file Authelia's `authentication_backend.file.path` uses, mounted read-write into this container
+- `password.algorithm` / `password.argon2.*` - must match `authentication_backend.file.password` in Authelia's own `configuration.yml`, so password changes made here verify correctly. Only `algorithm: argon2` with `variant: argon2id` is supported for writing passwords.
 
 #### Database (Authelia storage)
 
@@ -163,7 +180,7 @@ authelia:
 
 # Directory service configuration
 directory:
-  # Type of directory service (currently only lldap-graphql is supported)
+  # Type of directory service: lldap-graphql or file
   type: lldap-graphql
   # Configuration for LLDAP GraphQL backend
   lldap-graphql:
@@ -175,6 +192,28 @@ directory:
     # LDAP base DN (required for password changes)
     ldap_base_dn: dc=example,dc=com
 ```
+
+Or, to use Authelia's file provider instead of LLDAP:
+
+```yaml
+directory:
+  type: file
+  file:
+    # Must be the same file Authelia's authentication_backend.file.path points to
+    path: /config/users_database.yml
+    password:
+      # Must match authentication_backend.file.password in Authelia's configuration.yml
+      algorithm: argon2
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        keyLength: 32
+        saltLength: 16
+```
+
+Assign roles by adding the user to a group in `users_database.yml` directly (`admin`, `user_manager`, or `password_manager` - see the roles table above).
 
 ### Docker
 
